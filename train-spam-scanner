@@ -1,0 +1,735 @@
+#!/bin/bash
+
+# train-spam-scanner: trains spamassassin via folders
+#
+# This script is designed to train spammassassin from
+# imap folders on a dovecot server.  It was developed
+# for use on ISPConfig systems, but should easily adapt
+# to others.
+#
+# https://github.com/jnorell/train-spam-scanner
+#
+
+# Copyright (c) 2017, Jesse Norell <jesse@kci.net>
+# Copyright (c) 2017, Kentec Communications, Inc.
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+# ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+# TODO: read these settings from cli options,
+# and/or integrate to settings within ispconfig
+
+# default config file
+CONFIG_FILE=${CONFIG_FILE:-'/etc/train-spam-scanner/train-spam-scanner.conf'}
+
+usage() {
+    cat <<-EOF
+	Usage: train-spam-scanner [OPTION] ...
+
+	Train Spamassassin and manage training folders on a dovecot server.
+
+	Available options:
+	  -c file                    set config file location
+	  -a email-address           specify admin email address
+                                 use multiple times as needed
+	  -h                         display this help and exit
+	EOF
+}
+
+optstring='c:a:h'
+
+# minimal getops to specify config file (full getopts is below)
+while getopts ":$optstring" opt; do
+  case $opt in
+    c) test -n "$OPTARG" && CONFIG_FILE=$OPTARG;;
+    a) test -n "$OPTARG" && unset_admin_users=true;;
+    h) usage && exit 0;;
+  esac
+done
+
+test -r "${CONFIG_FILE}" && . "${CONFIG_FILE}"
+test -n "$unset_admin_users" && ADMIN_USERS=()
+
+OPTIND=1
+# full getopts parsing (cli args override config file)
+while getopts "$optstring" opt; do
+  case $opt in
+    c|h) : ;;
+    a) test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
+    *) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+
+# how to rebuild/merge mail in working and incoming folders
+#  incremental:  add only recent spam/non-spam messages (default)
+#  rebuild:      completely wipe and recreate
+: ${REBUILD_FOLDERS_MODE:='incremental'}
+
+# how to train/rebuild bayes db
+#  normal:       train live bayes db with all messages
+#                in admin incoming folders and admin training folders (default)
+#  rebuild:      create and train a new bayes db, then move to live
+#  incremental:  **not yet implemented**, the intent is to:
+#                - unlearn old messages being removed from incoming folders
+#                - train new messages going into incoming folders
+#                - train "new" messages in training folders (have to be
+#                  able to identify which messages have changed since last run)
+#                  :: TODO:  this last step seems impossible via doveadm searches,
+#                  :: maybe store a guid list for each folder and compare current to previous?
+: ${REBUILD_BAYES_MODE:='normal'}
+
+# imap users given rights to the admin folder,
+# ie. these users/logins have access to the Admin/* training folders
+# (you must create these users manually before running this script)
+: ${ADMIN_USERS:=("email-admin@`hostname -f`")}
+
+# should we create training folders for all user accounts (yes/no)
+: ${CREATE_USER_FOLDERS:='no'}
+
+# clean up user training messages older than this time
+# (must be a valid date specification for a dovecot search_query)
+: ${CLEANUP_USER_MESSAGES_BEFORE:='27weeks'}
+
+# clean up admin training messages older than this time
+# (must be a valid date specification for a dovecot search_query)
+: ${CLEANUP_ADMIN_MESSAGES_BEFORE:='53weeks'}
+
+# unix user/group which owns the shared folders
+: ${SHARED_USER:='vmail'}
+: ${SHARED_GROUP:='vmail'}
+
+# unix user which spam training should be performed as
+: ${TRAIN_AS_USER:='amavis'}
+: ${TRAIN_AS_GROUP:='amavis'}
+
+# location of shared folders
+: ${SHARED_ROOT:='/var/vmail/admin'}
+
+# location of bind mount point for training
+: ${TRAIN_BIND_MNT:='/var/lib/amavis/mnt'}
+
+# location of live bayes dbpath (unused for sql/redis bayes store)
+: ${BAYES_LIVE_DBPATH:="/var/lib/amavis/.spamassassin/bayes"}
+
+# location of tmp dir for rebuilding bayes db when training
+: ${BAYES_TEMP:='/var/lib/amavis/.bayes-rebuild'}
+
+# location of bayes dbpath to be trained (unused for sql/redis bayes store)
+# setting to ${BAYES_LIVE_DBPATH} will train the live bayes db
+: ${BAYES_TRAIN_DBPATH:="${BAYES_TEMP}/bayes"}
+
+# sa-learn args to point to bayes db (leave empty for sql/redis bayes)
+: ${BAYES_DBPATH_ARGS:="--dbpath ${BAYES_TRAIN_DBPATH}"}
+
+# location of persistent data (timestamp file) and tmp files (guid lists)
+: ${DATA_DIR:='/var/lib/train-spam-scanner'}
+
+# imap admin namespace
+: ${ADMIN_NAMESPACE:='Admin/'}
+
+# imap folder names for users' training folders
+: ${USER_FOLDER_SPAM:='Train as Spam'}
+: ${USER_FOLDER_NONSPAM:='Train as Non-Spam'}
+
+# imap folder names for admin incoming (copied from users)
+: ${ADMIN_FOLDER_USER_SPAM:='User Trained Spam'}
+: ${ADMIN_FOLDER_USER_NONSPAM:='User Trained Non-Spam'}
+# imap folder names for admin training
+: ${ADMIN_FOLDER_SPAM:='Spam'}
+: ${ADMIN_FOLDER_NONSPAM:='Non-Spam'}
+: ${ADMIN_FOLDER_IGNORE:='Ignore'}
+
+# working/temp folders
+: ${TMP_FOLDER_SPAM:='Temporary Working Dir for Spam'}
+: ${TMP_FOLDER_NONSPAM:='Temporary Working Dir for Non-Spam'}
+
+# probably don't need changed:
+: ${TIMESTAMP:="${DATA_DIR}/last_import.timestamp"}
+: ${TMP_TIMESTAMP:="${DATA_DIR}/current_running.timestamp"}
+: ${SORTED_GUIDS:="${DATA_DIR}/sorted_message_guids.txt"}
+: ${INCOMING_SPAM_GUIDS:="${DATA_DIR}/incoming_spam_message_guids.txt"}
+: ${INCOMING_NONSPAM_GUIDS:="${DATA_DIR}/incoming_nonspam_message_guids.txt"}
+: ${TMP_SPAM_GUIDS:="${DATA_DIR}/tmp_spam_message_guids.txt"}
+: ${TMP_NONSPAM_GUIDS:="${DATA_DIR}/tmp_nonspam_message_guids.txt"}
+
+# if not rebuilding, force use of live bayes db
+if [ "${REBUILD_BAYES_MODE}" != "rebuild" -a -n "${BAYES_DBPATH_ARGS}" ]
+then
+	BAYES_TRAIN_DBPATH="${BAYES_LIVE_DBPATH}"
+	BAYES_DBPATH_ARGS="--dbpath ${BAYES_TRAIN_DBPATH}"
+fi
+
+umask 077
+
+# check that we have at least one valid admin user
+for addr in "${ADMIN_USERS[@]}"
+do
+	doveadm user -u "${addr}" 2>/dev/null >/dev/null && admin_user="${addr}" && break
+done
+if [ -z "${admin_user}" ]
+then
+	echo "Error: ADMIN_USERS must specify a valid administrative user (dovecot user)" 1>&2
+	exit
+fi
+
+# ensure the shared directory exists
+if [ ! -d ${SHARED_ROOT} ]
+then
+	mkdir -p ${SHARED_ROOT}
+	chown ${SHARED_USER}:${SHARED_GROUP} ${SHARED_ROOT}
+	chmod 700 ${SHARED_ROOT}
+fi
+if [ ! -d ${SHARED_ROOT} ]
+then
+	echo "Error: shared root (${SHARED_ROOT}) cannot be made, exiting." 1>&2
+	exit 1
+fi
+
+# ensure the bind mount directory exists
+if [ ! -d ${TRAIN_BIND_MNT} ]
+then
+	mkdir -p ${TRAIN_BIND_MNT}
+	chmod 700 ${TRAIN_BIND_MNT}
+fi
+if [ ! -d ${TRAIN_BIND_MNT} ]
+then
+	echo "Error: shared root (${TRAIN_BIND_MNT}) cannot be made, exiting." 1>&2
+	exit 1
+fi
+
+# ensure the persistent data directory exists
+if [ ! -d ${DATA_DIR} ]
+then
+	mkdir -p ${DATA_DIR}
+fi
+if [ ! -d ${DATA_DIR} ]
+then
+	echo "Error: persistent data dir (${DATA_DIR}) cannot be made, exiting." 1>&2
+	exit 1
+fi
+
+# ensure bindfs is installed
+BINDFS=`which bindfs 2>/dev/null | head -1`
+if [ -z "${BINDFS}" -o ! -f "${BINDFS}" ] 
+then 
+    echo "Cannot find bindfs.  Exiting." 1>&2
+    exit 1
+fi
+
+# test if fdupes is installed (optional, but recommended)
+FDUPES=`which fdupes 2>/dev/null | head -1`
+if [ -z "${FDUPES}" -o ! -f "${FDUPES}" ] 
+then 
+    echo "Notice: cannot find fdupes, but continuing anyways." 1>&2
+    echo "(installing fdupes would provide better consistency and deduplication)" 1>&2
+fi
+
+# ensure the temp working folders exist
+mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/{cur,new,tmp}"
+mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/{cur,new,tmp}"
+
+# create missing Admin/ shared folders
+# assume Maildir++ (folder names are .whatever)
+mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_SPAM}"
+mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_NONSPAM}"
+mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}"
+mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}"
+mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}"
+
+chown -R ${SHARED_USER}:${SHARED_GROUP} ${SHARED_ROOT}
+find ${SHARED_ROOT} -type d -print0 | xargs -0 chmod 700
+
+inArray () {
+  local e
+  for e in "${@:2}"; do [[ "$e" == "$1" ]] && return 0; done
+  return 1
+}
+
+save_IFS=${IFS}
+
+# set all permissions for Admin/ shared folders
+for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
+do
+	doveadm acl delete -u "${admin_user}" "${mailbox}" "authenticated"  2>/dev/null
+	doveadm acl delete -u "${admin_user}" "${mailbox}" "anyone"  2>/dev/null
+
+	IFS='='
+	doveadm -f flow acl rights -u "${admin_user}" "${mailbox}"  2>/dev/null  | awk '/^[^=]+=.+/' | \
+	sed 's/\s*Rights//g' | while read addr rights
+	do
+		test -z "${addr}" && continue
+
+		if inArray $addr "${ADMIN_USERS[@]}"
+		then
+			doveadm acl set -u "${admin_user}" "${mailbox}" "user=${addr}" lookup read write write-seen write-deleted insert post expunge  2>/dev/null
+		else
+			doveadm mailbox unsubscribe -u "${addr}" "${mailbox}"
+			doveadm acl delete -u "${admin_user}" "${mailbox}" "user=${addr}"  2>/dev/null
+		fi
+	done
+	IFS=${save_IFS}
+
+	for addr in "${ADMIN_USERS[@]}"
+	do
+		doveadm acl set -u "${admin_user}" "${mailbox}" "user=${addr}" lookup read write write-seen write-deleted insert post expunge  2>/dev/null
+		doveadm mailbox subscribe -u "${addr}" "${mailbox}"
+	done
+done
+
+# set some permissions for temp working folders
+for mailbox in "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
+do
+	doveadm acl delete -u "${admin_user}" "${mailbox}" "authenticated"  2>/dev/null
+	doveadm acl delete -u "${admin_user}" "${mailbox}" "anyone"  2>/dev/null
+
+	IFS='='
+	doveadm -f flow acl rights -u "${admin_user}" "${mailbox}"  2>/dev/null  | awk '/^[^=]+=.+/' | \
+	sed 's/\s*Rights//g' | while read addr rights
+	do
+		test -z "${addr}" && continue
+
+		doveadm mailbox unsubscribe -u "${addr}" "${mailbox}"
+		doveadm acl delete -u "${admin_user}" "${mailbox}" "user=${addr}"  2>/dev/null
+	done
+	IFS=${save_IFS}
+
+	doveadm acl set -u "${admin_user}" "${mailbox}" "authenticated" write write-seen write-deleted insert  2>/dev/null
+done
+
+# create user training folders and subscribe users
+if [ "${CREATE_USER_FOLDERS}" == "yes" ]
+then
+	doveadm mailbox create -A -s "${USER_FOLDER_SPAM}" "${USER_FOLDER_NONSPAM}" 2>/dev/null
+fi
+
+# empty temp working folders
+for mailbox in "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
+do
+	doveadm expunge -u "${admin_user}" mailbox "${mailbox}" all  2>/dev/null
+done
+
+# read timestamp (of the last import of user mail)
+if [ -f ${TIMESTAMP} ]
+then
+	TS=`stat --format %Y "${TIMESTAMP}"`
+else
+	TS=0
+fi
+
+# generate and save (tmp) current timestamp
+touch ${TMP_TIMESTAMP}
+
+# copy mail from user training folders to working folders
+doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" mailbox "${USER_FOLDER_SPAM}"  2>/dev/null
+doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}" mailbox "${USER_FOLDER_NONSPAM}"  2>/dev/null
+# this was the logic, but it seems you must always completely rebuild the tmp folders,
+# as there is no way to know when a user has corrected a training mistake by deleting a message
+# from their training folders (ie. we can pick up new messages, but not detect the absence of old messages
+# with a simple doveadm copy command - we'd have to compare guids in incoming and training folders (and
+# ignore training message older than $TS))
+#if [ "${REBUILD_FOLDERS_MODE}" == "rebuild" -o ! "${TS}" -gt 0 ]
+#then
+#	doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" mailbox "${USER_FOLDER_SPAM}"  2>/dev/null
+#	doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}" mailbox "${USER_FOLDER_NONSPAM}"  2>/dev/null
+#else
+#	# copy only mail which is newer than timestamp
+#	doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" mailbox "${USER_FOLDER_SPAM}" SAVEDSINCE "${TS}"  2>/dev/null
+#	doveadm copy -A "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}" mailbox "${USER_FOLDER_NONSPAM}" SAVEDSINCE "${TS}"  2>/dev/null
+#fi
+
+# de-duplicate working folders by dovecot message guid
+doveadm deduplicate -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}"  2>/dev/null
+doveadm deduplicate -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"  2>/dev/null
+
+# de-duplicate working folders with fdupes
+if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+then
+	fdupes -q -d -N -r -H "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/"{new,cur} >/dev/null
+	fdupes -q -d -N -r -H "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/"{new,cur} >/dev/null
+fi
+
+# build list of admin sorted message guid's
+cp /dev/null ${SORTED_GUIDS}
+chmod 0700 ${SORTED_GUIDS}
+for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
+do
+	doveadm -f table fetch -u "${admin_user}" 'guid' mailbox "${mailbox}" 2>/dev/null
+done | awk '{print $1}' | sort -u > "${SORTED_GUIDS}"
+
+need_to_train="false"
+
+if [ "${REBUILD_FOLDERS_MODE}" == "rebuild" ]
+then
+	# empty admin incoming folders
+	for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
+		"${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}"
+	do
+		doveadm expunge -u "${admin_user}" mailbox "${mailbox}" all  2>/dev/null
+	done
+
+	#  move mail in working Spam to incoming Spam,
+	#  excluding already sorted messages
+	src_MBX="${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}"
+	dst_MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
+		| grep -F -f "${SORTED_GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		# probably should do a limited number at a time (200 or so?)
+		doveadm expunge -u "${admin_user}" mailbox "${src_MBX}" uid "${uid_list}"
+	fi
+
+	if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+	then
+		need_to_train="true"
+		doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" all
+	fi
+
+	#  move mail in working Non-Spam to incoming Non-Spam,
+	#  excluding already sorted messages
+	src_MBX="${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
+	dst_MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
+		| grep -F -f "${SORTED_GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		doveadm expunge -u "${admin_user}" mailbox "${src_MBX}" uid "${uid_list}"
+	fi
+
+	if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+	then
+		need_to_train="true"
+		doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" all
+	fi
+
+else  # rebuild folders in 'incremental' mode
+
+	# save message guids for working and incoming folders
+	doveadm -f table fetch -u "${admin_user}" 'guid' \
+		mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" 2>/dev/null \
+		| awk '{print $1}' | sort -u > "${TMP_SPAM_GUIDS}"
+	doveadm -f table fetch -u "${admin_user}" 'guid' \
+		mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}" 2>/dev/null \
+		| awk '{print $1}' | sort -u > "${TMP_NONSPAM_GUIDS}"
+	doveadm -f table fetch -u "${admin_user}" 'guid' \
+		mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" 2>/dev/null \
+		| awk '{print $1}' | sort -u > "${INCOMING_SPAM_GUIDS}"
+	doveadm -f table fetch -u "${admin_user}" 'guid' \
+		mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" 2>/dev/null \
+		| awk '{print $1}' | sort -u > "${INCOMING_NONSPAM_GUIDS}"
+
+	#  remove from incoming Spam any messages in working Non-Spam
+	MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}"
+	GUIDS="${TMP_NONSPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
+		| grep -F -f "${GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		need_to_train="true"
+		doveadm expunge -u "${admin_user}" mailbox "${MBX}" uid "${uid_list}"
+	fi
+
+	#  remove from incoming Non-Spam any messages in working Spam
+	MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}"
+	GUIDS="${TMP_SPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
+		| grep -F -f "${GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		need_to_train="true"
+		doveadm expunge -u "${admin_user}" mailbox "${MBX}" uid "${uid_list}"
+	fi
+
+	#  remove from incoming Spam any messages not in working Spam
+	MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}"
+	GUIDS="${TMP_SPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
+		| grep -v -F -f "${GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		need_to_train="true"
+		doveadm expunge -u "${admin_user}" mailbox "${MBX}" uid "${uid_list}"
+	fi
+
+	#  remove from incoming Non-Spam any messages not in working Non-Spam
+	MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}"
+	GUIDS="${TMP_NONSPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
+		| grep -v -F -f "${GUIDS}" )
+
+	uid_list=`echo "${uid_list}" | sed s/,$//`
+	if [ -n "${uid_list}" ]
+	then
+		need_to_train="true"
+		doveadm expunge -u "${admin_user}" mailbox "${MBX}" uid "${uid_list}"
+	fi
+
+	#  move to incoming Spam any messages in working Spam
+	# excluding messages already in incoming Spam and already sorted messages
+	src_MBX="${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}"
+	dst_MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}"
+	GUIDS="${INCOMING_SPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
+		| grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
+
+	if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+	then
+		need_to_train="true"
+		doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" uid "${uid_list}"
+	fi
+
+	#  move to incoming Non-Spam any messages in working Non-Spam
+	# excluding messages already in incoming Non-Spam and already sorted messages
+	src_MBX="${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
+	dst_MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}"
+	GUIDS="${INCOMING_NONSPAM_GUIDS}"
+	uid_list=""
+
+	while read guid uid
+	do
+		uid_list+="${uid},"
+	done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
+		| grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
+
+	if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+	then
+		need_to_train="true"
+		doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" uid "${uid_list}"
+	fi
+
+fi
+
+
+# record (permanent) previously saved "current timestamp"
+touch -r "${TMP_TIMESTAMP}" "${TIMESTAMP}" && rm -f "${TMP_TIMESTAMP}"
+
+# de-duplicate admin incoming and archive folders
+for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
+do
+	doveadm deduplicate -u "${admin_user}" mailbox "${mailbox}"  2>/dev/null
+done
+
+# identify messages found in both ${ADMIN_FOLDER_SPAM} and
+# ${ADMIN_FOLDER_NONSPAM} and move them to ${ADMIN_FOLDER_IGNORE}
+if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+then
+	fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}/"{new,cur} >/dev/null
+	fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}/"{new,cur} >/dev/null
+
+	fdupes -q -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}/"{new,cur} \
+		"${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}/"{new,cur} \
+    	| grep -v '^$' | xargs -I {} mv "{}" "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}/new"
+fi
+
+# de-duplicate admin incoming and archive folders with fdupes
+if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+then
+	# the order of directories here is important, the *first* duplicate file found will be kept
+	fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}/"{new,cur} \
+		"${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}/"{new,cur} \
+		"${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}/"{new,cur} \
+		"${SHARED_ROOT}/.${ADMIN_FOLDER_USER_SPAM}/"{new,cur} \
+		"${SHARED_ROOT}/.${ADMIN_FOLDER_USER_NONSPAM}/"{new,cur} >/dev/null
+fi
+
+# index admin incoming and training folders
+for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" \
+	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
+do
+	doveadm index -u "${admin_user}" mailbox "${mailbox}"  2>/dev/null
+done
+
+if [ "${need_to_train}" == "true" ]
+then
+
+  # sa-learn will fail when run from a directory that ${TRAIN_AS_USER} can't access (eg. /root)
+  cd /
+
+  if [ "${REBUILD_BAYES_MODE}" == "incremental" ]
+  then
+    echo "'incremental' bayes training not yet implemented, using 'normal' mode"
+    REBUILD_BAYES_MODE="normal"
+  fi
+
+  if [ "${REBUILD_BAYES_MODE}" == "rebuild" ]
+  then
+	if [ -n "${BAYES_DBPATH_ARGS}" -a -n "${BAYES_TEMP}" \
+		-a "${BAYES_TRAIN_DBPATH}" != "${BAYES_LIVE_DBPATH}" ]
+	then
+		mkdir -p ${BAYES_TEMP}
+		chown ${TRAIN_AS_USER}:${TRAIN_AS_GROUP} ${BAYES_TEMP}
+		chmod 750 ${BAYES_TEMP}
+	fi
+
+	# create new/empty bayes db
+	su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --clear"
+
+  else
+    # set vars for bayes db location and sa-learn parameters
+    :
+  fi
+
+  # bindfs mount remaps user id so spam training user can access the messages
+  bindfs -r -u ${TRAIN_AS_USER} -g ${TRAIN_AS_GROUP} -p ug=rD ${SHARED_ROOT} ${TRAIN_BIND_MNT}
+
+# TODO (maybe):  implement a cleanup/filtering script to process all
+# messages about to be trained and strip various headers, etc.
+
+  # train admin incoming folders (user sorted email)
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --max-size=0 --no-sync --spam \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_SPAM}/\""
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --sync"
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --max-size=0 --no-sync --ham \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_NONSPAM}/\""
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --sync"
+
+  # train admin training folders (admin sorted email)
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --max-size=0 --no-sync --spam \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_SPAM}/\""
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --sync"
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --max-size=0 --no-sync --ham \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_NONSPAM}/\""
+  su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --sync"
+
+  # we're just going to ignore the "Ignore" messages, rather than sa-learn --forget them
+  #su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --max-size=0 --forget \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_IGNORE}/\""
+
+  umount ${TRAIN_BIND_MNT}
+
+  # rotate bayes db if needed
+  if [ "${REBUILD_BAYES_MODE}" == "rebuild" ]
+  then
+	if [ -n "${BAYES_DBPATH_ARGS}" -a -n "${BAYES_TEMP}" \
+		-a "${BAYES_TRAIN_DBPATH}" != "${BAYES_LIVE_DBPATH}" ]
+	then
+		mv -f "${BAYES_TRAIN_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_seen"
+		mv -f "${BAYES_TRAIN_DBPATH}_toks" "${BAYES_LIVE_DBPATH}_toks"
+		# might need to disable this if auto_learn is on ?
+		chattr +A "${BAYES_LIVE_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_toks"
+	fi
+  fi
+
+  sync
+
+  # restart amavis and spamd if currently running
+  /etc/init.d/amavis status 2>/dev/null >/dev/null && /etc/init.d/amavis restart >/dev/null
+  /etc/init.d/spamassassin status 2>/dev/null >/dev/null && /etc/init.d/spamassassin restart >/dev/null
+
+fi
+
+
+# Cleanup old user messages
+if [ -n "${CLEANUP_USER_MESSAGES_BEFORE}" ]
+then
+	doveadm expunge -A mailbox "${USER_FOLDER_SPAM}" before "${CLEANUP_USER_MESSAGES_BEFORE}"  2>/dev/null
+	doveadm expunge -A mailbox "${USER_FOLDER_NONSPAM}" before "${CLEANUP_USER_MESSAGES_BEFORE}"  2>/dev/null
+
+	if [ "${REBUILD_FOLDERS_MODE}" != "rebuild" ]
+	then
+		doveadm expunge -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" before "${CLEANUP_USER_MESSAGES_BEFORE}"  2>/dev/null
+		doveadm expunge -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" before "${CLEANUP_USER_MESSAGES_BEFORE}"  2>/dev/null
+	fi
+fi
+
+# Cleanup old admin training messages
+if [ -n "${CLEANUP_ADMIN_MESSAGES_BEFORE}" ]
+then
+	doveadm expunge -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" before "${CLEANUP_ADMIN_MESSAGES_BEFORE}"  2>/dev/null
+	doveadm expunge -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" before "${CLEANUP_ADMIN_MESSAGES_BEFORE}"  2>/dev/null
+	doveadm expunge -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}" before "${CLEANUP_ADMIN_MESSAGES_BEFORE}"  2>/dev/null
+fi
+
+# empty temp working folders
+for mailbox in "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" \
+	"${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
+do
+	doveadm expunge -u "${admin_user}" mailbox "${mailbox}" all  2>/dev/null
+done
+
+# cleanup tmp files
+test -f "${SORTED_GUIDS}" && rm -f "${SORTED_GUIDS}"
+test -f "${INCOMING_SPAM_GUIDS}" && rm -f "${INCOMING_SPAM_GUIDS}"
+test -f "${INCOMING_NONSPAM_GUIDS}" && rm -f "${INCOMING_NONSPAM_GUIDS}"
+test -f "${TMP_SPAM_GUIDS}" && rm -f "${TMP_SPAM_GUIDS}"
+test -f "${TMP_NONSPAM_GUIDS}" && rm -f "${TMP_NONSPAM_GUIDS}"
+
+# todo: email stats? (# messages, tokens, time taken)
+su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --dump magic"
+
+exit 0
+
