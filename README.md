@@ -2,7 +2,7 @@
 
 train-spam-scanner is a bash script to handle spamassassin training from imap folders on a dovecot server.
 
-The design tries to balance the pro's and con's of having users vs. mail administrators train spamassassin.
+The design tries to balance the pro's and con's of having users vs. mail administrators classify messages to train spamassassin.
 
 ## Status
 
