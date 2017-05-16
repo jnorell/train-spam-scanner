@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # train-spam-scanner: trains spamassassin via folders
-#
+
 # This script is designed to train spammassassin from
 # imap folders on a dovecot server.  It was developed
 # for use on ISPConfig systems, but should easily adapt
 # to others.
 #
 # https://github.com/jnorell/train-spam-scanner
-#
 
 # Copyright (c) 2017, Jesse Norell <jesse@kci.net>
 # Copyright (c) 2017, Kentec Communications, Inc.
@@ -43,19 +42,20 @@ CONFIG_FILE=${CONFIG_FILE:-'/etc/train-spam-scanner/train-spam-scanner.conf'}
 
 usage() {
     cat <<-EOF
-	Usage: train-spam-scanner [OPTION] ...
+        Usage: train-spam-scanner [OPTION] ...
 
-	Train Spamassassin and manage training folders on a dovecot server.
+        Train Spamassassin and manage training folders on a dovecot server.
 
-	Available options:
-	  -c file                    set config file location
-	  -a email-address           specify admin email address
-                                 use multiple times as needed
-	  -h                         display this help and exit
-	EOF
+        Available options:
+          -c file                    set config file location
+          -a email-address           specify admin email address
+                                     use multiple times as needed
+          -F                         create training folders for all users
+          -h                         display this help and exit
+        EOF
 }
 
-optstring='c:a:h'
+optstring='c:a:hF'
 
 # minimal getops to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -75,6 +75,7 @@ while getopts "$optstring" opt; do
   case $opt in
     c|h) : ;;
     a) test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
+    F) CREATE_USER_FOLDERS="yes";;
     *) usage && exit 1;;
   esac
 done
