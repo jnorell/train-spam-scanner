@@ -47,22 +47,26 @@ usage() {
         Train Spamassassin and manage training folders on a dovecot server.
 
         Available options:
-          -c file                    set config file location
-          -a email-address           specify admin email address
-                                     use multiple times as needed
-          -F                         create training folders for all users
-          -h                         display this help and exit
-        EOF
+          -c file                 set config file location
+          -a email-address        specify admin email address
+                                  use multiple times as needed
+          -F                      create training folders for all users
+          -m mode                 mode to rebuild/merge mail in folders
+            'incremental'         only add/remove message changes (default)
+            'rebuild'             wipe and recreate folders
+          -h                      display this help and exit
+
+	EOF
 }
 
-optstring='c:a:hF'
+optstring='c:a:hFm:'
 
 # minimal getops to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
   case $opt in
-    c) test -n "$OPTARG" && CONFIG_FILE=$OPTARG;;
-    a) test -n "$OPTARG" && unset_admin_users=true;;
-    h) usage && exit 0;;
+    c)  test -n "$OPTARG" && CONFIG_FILE=$OPTARG;;
+    a)  test -n "$OPTARG" && unset_admin_users=true;;
+    h)  usage && exit 0;;
   esac
 done
 
@@ -74,9 +78,14 @@ OPTIND=1
 while getopts "$optstring" opt; do
   case $opt in
     c|h) : ;;
-    a) test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
-    F) CREATE_USER_FOLDERS="yes";;
-    *) usage && exit 1;;
+    a)  test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
+    F)  CREATE_USER_FOLDERS="yes";;
+    m)  test -n "$OPTARG" || (usage && exit 1)
+        case "$OPTARG" in
+           incremental|rebuild)  REBUILD_FOLDERS_MODE="$OPTARG";;
+           *)  usage && exit 1;;
+        esac;;
+    *)  usage && exit 1;;
   esac
 done
 shift $((OPTIND-1))
