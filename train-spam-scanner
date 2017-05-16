@@ -54,12 +54,15 @@ usage() {
           -m mode                 mode to rebuild/merge mail in folders
             'incremental'         only add/remove message changes (default)
             'rebuild'             wipe and recreate folders
+          -M mode                 train live bayes db
+            'normal'              only add/remove message changes (default)
+            'rebuild'             create and train a new bayes db, then move to live
           -h                      display this help and exit
 
 	EOF
 }
 
-optstring='c:a:hFm:'
+optstring='c:a:hFm:M:'
 
 # minimal getops to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -83,6 +86,11 @@ while getopts "$optstring" opt; do
     m)  test -n "$OPTARG" || (usage && exit 1)
         case "$OPTARG" in
            incremental|rebuild)  REBUILD_FOLDERS_MODE="$OPTARG";;
+           *)  usage && exit 1;;
+        esac;;
+    M)  test -n "$OPTARG" || (usage && exit 1)
+        case "$OPTARG" in
+           normal|rebuild|incremental)  REBUILD_BAYES_MODE="$OPTARG";;
            *)  usage && exit 1;;
         esac;;
     *)  usage && exit 1;;
