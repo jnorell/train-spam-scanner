@@ -100,7 +100,7 @@ namespace {
     subscriptions = yes
 }
 EOF
-
+```
 
 Need dovecot iterate_query enabled, which is in /etc/dovecot/dovecot-sql.conf if using ISPConfig.
 
@@ -111,7 +111,7 @@ sa-learn will be run as the amavis user, using a bindfs mount to map vmail->amav
 
 ## Considerations
 
-You may want to exclude users' training folders from quota limits.
+You may want to exclude users' training folders from quota limits (to do so, alter iterate_query).
 
 Users should be aware that any mail they put into the training folders will probably be reviewed/seen by an admin, and may be stored on the server for quite some time -- so don't put any sensitive information in there.  Also make sure that is legal in your country.
 
