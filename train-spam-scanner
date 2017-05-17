@@ -34,37 +34,42 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-# TODO: read these settings from cli options,
-# and/or integrate to settings within ispconfig
+# TODO (maybe): integrate to settings within ispconfig
 
 # default config file
 CONFIG_FILE=${CONFIG_FILE:-'/etc/train-spam-scanner/train-spam-scanner.conf'}
 
 usage() {
-    cat <<-EOF
+    cat <<-'EOF'
         Usage: train-spam-scanner [OPTION] ...
 
         Train Spamassassin and manage training folders on a dovecot server.
 
         Available options:
-          -c file                 set config file location
-          -a email-address        specify admin email address
-                                  use multiple times as needed
-          -F                      create training folders for all users
-          -m mode                 mode to rebuild/merge mail in folders
-            'incremental'         only add/remove message changes (default)
-            'rebuild'             wipe and recreate folders
-          -M mode                 train live bayes db
-            'normal'              only add/remove message changes (default)
-            'rebuild'             create and train a new bayes db, then move to live
-          -h                      display this help and exit
+          -c file     set config file location
+          -h          display this help and exit
+          -a email-address
+                      specify admin email address (use multiple times as needed)
+          -F          create training folders for all users
+          -m mode     mode to rebuild/merge mail in folders
+                      'incremental'   only add/remove message changes (default)
+                      'rebuild'       wipe and recreate folders
+          -M mode     mode to train bayes db
+                      'normal'        train live bayes db (default)
+                      'rebuild'       create a new bayes db, then replace live
+          -b date-spec
+                      clean up user training messages older than this
+                      (a valid date specification for dovecot search_query)
+          -B date-spec
+                      clean up admin training messages older than this
+                      (a valid date specification for dovecot search_query)
 
 	EOF
 }
 
-optstring='c:a:hFm:M:'
+optstring='c:ha:Fm:M:b:B:'
 
-# minimal getops to specify config file (full getopts is below)
+# minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
   case $opt in
     c)  test -n "$OPTARG" && CONFIG_FILE=$OPTARG;;
@@ -93,6 +98,8 @@ while getopts "$optstring" opt; do
            normal|rebuild|incremental)  REBUILD_BAYES_MODE="$OPTARG";;
            *)  usage && exit 1;;
         esac;;
+    b)  test -n "$OPTARG" && CLEANUP_USER_MESSAGES_BEFORE="$OPTARG";;
+    B)  test -n "$OPTARG" && CLEANUP_ADMIN_MESSAGES_BEFORE="$OPTARG";;
     *)  usage && exit 1;;
   esac
 done
