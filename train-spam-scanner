@@ -61,6 +61,9 @@ usage() {
           -g group    unix group which owns the shared folders
           -U user     unix user which spam training should be performed as
           -G group    unix group which spam training should be performed as
+          -d dir      location of shared folders
+          -D dir      location of bind mount point for training
+          -w dir      location of persistent data
           -b date-spec
                       clean up user training messages older than this
                       (a valid date specification for dovecot search_query)
@@ -71,7 +74,7 @@ usage() {
 	EOF
 }
 
-optstring='c:ha:Fm:M:u:g:U:G:b:B:'
+optstring='c:ha:Fm:M:u:g:U:G:d:D:w:b:B:'
 
 # minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -108,6 +111,9 @@ while getopts "$optstring" opt; do
     g)  test -n "$OPTARG" && SHARED_GROUP="$OPTARG";;
     U)  test -n "$OPTARG" && TRAIN_AS_USER="$OPTARG";;
     G)  test -n "$OPTARG" && TRAIN_AS_GROUP="$OPTARG";;
+    d)  test -n "$OPTARG" && SHARED_ROOT="$OPTARG";;
+    D)  test -n "$OPTARG" && TRAIN_BIND_MNT="$OPTARG";;
+    w)  test -n "$OPTARG" && DATA_DIR="$OPTARG";;
     *)  usage && exit 1;;
   esac
 done
