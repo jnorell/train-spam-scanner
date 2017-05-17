@@ -57,6 +57,10 @@ usage() {
           -M mode     mode to train bayes db
                       'normal'        train live bayes db (default)
                       'rebuild'       create a new bayes db, then replace live
+          -u user     unix user which owns the shared folders
+          -g group    unix group which owns the shared folders
+          -U user     unix user which spam training should be performed as
+          -G group    unix group which spam training should be performed as
           -b date-spec
                       clean up user training messages older than this
                       (a valid date specification for dovecot search_query)
@@ -67,7 +71,7 @@ usage() {
 	EOF
 }
 
-optstring='c:ha:Fm:M:b:B:'
+optstring='c:ha:Fm:M:u:g:U:G:b:B:'
 
 # minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -100,6 +104,10 @@ while getopts "$optstring" opt; do
         esac;;
     b)  test -n "$OPTARG" && CLEANUP_USER_MESSAGES_BEFORE="$OPTARG";;
     B)  test -n "$OPTARG" && CLEANUP_ADMIN_MESSAGES_BEFORE="$OPTARG";;
+    u)  test -n "$OPTARG" && SHARED_USER="$OPTARG";;
+    g)  test -n "$OPTARG" && SHARED_GROUP="$OPTARG";;
+    U)  test -n "$OPTARG" && TRAIN_AS_USER="$OPTARG";;
+    G)  test -n "$OPTARG" && TRAIN_AS_GROUP="$OPTARG";;
     *)  usage && exit 1;;
   esac
 done
