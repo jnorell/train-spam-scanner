@@ -50,6 +50,7 @@ usage() {
           -h          display this help and exit
           -a email-address
                       specify admin email address (use multiple times as needed)
+          -f          create admin training folders and set permissions
           -F          create training folders for all users
           -m mode     mode to rebuild/merge mail in folders
                       'incremental'   only add/remove message changes (default)
@@ -74,7 +75,7 @@ usage() {
 	EOF
 }
 
-optstring='c:ha:Fm:M:u:g:U:G:d:D:w:b:B:'
+optstring='c:ha:fFm:M:u:g:U:G:d:D:w:b:B:'
 
 # minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -94,6 +95,7 @@ while getopts "$optstring" opt; do
   case $opt in
     c|h) : ;;
     a)  test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
+    f)  CREATE_ADMIN_FOLDERS="yes";;
     F)  CREATE_USER_FOLDERS="yes";;
     m)  test -n "$OPTARG" || (usage && exit 1)
         case "$OPTARG" in
@@ -142,6 +144,9 @@ shift $((OPTIND-1))
 # ie. these users/logins have access to the Admin/* training folders
 # (you must create these users manually before running this script)
 : ${ADMIN_USERS:=("email-admin@`hostname -f`")}
+
+# should we create admin training folders and set permissions for email admins
+: ${CREATE_ADMIN_FOLDERS:='no'}
 
 # should we create training folders for all user accounts (yes/no)
 : ${CREATE_USER_FOLDERS:='no'}
@@ -194,6 +199,7 @@ shift $((OPTIND-1))
 # imap folder names for admin incoming (copied from users)
 : ${ADMIN_FOLDER_USER_SPAM:='User Trained Spam'}
 : ${ADMIN_FOLDER_USER_NONSPAM:='User Trained Non-Spam'}
+
 # imap folder names for admin training
 : ${ADMIN_FOLDER_SPAM:='Spam'}
 : ${ADMIN_FOLDER_NONSPAM:='Non-Spam'}
@@ -272,48 +278,50 @@ fi
 BINDFS=`which bindfs 2>/dev/null | head -1`
 if [ -z "${BINDFS}" -o ! -f "${BINDFS}" ] 
 then 
-    echo "Cannot find bindfs.  Exiting." 1>&2
-    exit 1
+        echo "Cannot find bindfs.  Exiting." 1>&2
+        exit 1
 fi
 
 # test if fdupes is installed (optional, but recommended)
 FDUPES=`which fdupes 2>/dev/null | head -1`
 if [ -z "${FDUPES}" -o ! -f "${FDUPES}" ] 
 then 
-    echo "Notice: cannot find fdupes, but continuing anyways." 1>&2
-    echo "(installing fdupes would provide better consistency and deduplication)" 1>&2
+        echo "Notice: cannot find fdupes, but continuing anyways." 1>&2
+        echo "(installing fdupes would provide better consistency and deduplication)" 1>&2
 fi
 
-# ensure the temp working folders exist
-mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/{cur,new,tmp}"
-mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/{cur,new,tmp}"
-
-# create missing Admin/ shared folders
-# assume Maildir++ (folder names are .whatever)
-mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_SPAM}"
-mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_NONSPAM}"
-mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}"
-mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}"
-mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}"
-
-chown -R ${SHARED_USER}:${SHARED_GROUP} ${SHARED_ROOT}
-find ${SHARED_ROOT} -type d -print0 | xargs -0 chmod 700
-
 inArray () {
-  local e
-  for e in "${@:2}"; do [[ "$e" == "$1" ]] && return 0; done
-  return 1
+        local e
+        for e in "${@:2}"; do [[ "$e" == "$1" ]] && return 0; done
+        return 1
 }
 
-save_IFS=${IFS}
+if [ "${CREATE_ADMIN_FOLDERS}" == "yes" ]
+then
+  # ensure the temp working folders exist
+  mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/{cur,new,tmp}"
+  mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/{cur,new,tmp}"
 
-# set all permissions for Admin/ shared folders
-for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
+  # create missing Admin/ shared folders
+  # assume Maildir++ (folder names are .whatever)
+  mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_SPAM}"
+  mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_NONSPAM}"
+  mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}"
+  mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}"
+  mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}"
+
+  chown -R ${SHARED_USER}:${SHARED_GROUP} ${SHARED_ROOT}
+  find ${SHARED_ROOT} -type d -print0 | xargs -0 chmod 700
+
+  save_IFS=${IFS}
+
+  # set all permissions for Admin/ shared folders
+  for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
 	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" \
 	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
 	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_NONSPAM}" \
 	"${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
-do
+  do
 	doveadm acl delete -u "${admin_user}" "${mailbox}" "authenticated"  2>/dev/null
 	doveadm acl delete -u "${admin_user}" "${mailbox}" "anyone"  2>/dev/null
 
@@ -338,12 +346,12 @@ do
 		doveadm acl set -u "${admin_user}" "${mailbox}" "user=${addr}" lookup read write write-seen write-deleted insert post expunge  2>/dev/null
 		doveadm mailbox subscribe -u "${addr}" "${mailbox}"
 	done
-done
+  done
 
-# set some permissions for temp working folders
-for mailbox in "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" \
+  # set some permissions for temp working folders
+  for mailbox in "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" \
 	"${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"
-do
+  do
 	doveadm acl delete -u "${admin_user}" "${mailbox}" "authenticated"  2>/dev/null
 	doveadm acl delete -u "${admin_user}" "${mailbox}" "anyone"  2>/dev/null
 
@@ -359,7 +367,8 @@ do
 	IFS=${save_IFS}
 
 	doveadm acl set -u "${admin_user}" "${mailbox}" "authenticated" write write-seen write-deleted insert  2>/dev/null
-done
+  done
+fi
 
 # create user training folders and subscribe users
 if [ "${CREATE_USER_FOLDERS}" == "yes" ]
@@ -484,7 +493,7 @@ then
 		doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" all
 	fi
 
-else  # rebuild folders in 'incremental' mode
+else    # rebuild folders in 'incremental' mode
 
 	# save message guids for working and incoming folders
 	doveadm -f table fetch -u "${admin_user}" 'guid' \
@@ -665,8 +674,8 @@ then
 
   if [ "${REBUILD_BAYES_MODE}" == "incremental" ]
   then
-    echo "'incremental' bayes training not yet implemented, using 'normal' mode"
-    REBUILD_BAYES_MODE="normal"
+        echo "'incremental' bayes training not yet implemented, using 'normal' mode"
+        REBUILD_BAYES_MODE="normal"
   fi
 
   if [ "${REBUILD_BAYES_MODE}" == "rebuild" ]
@@ -683,8 +692,8 @@ then
 	su ${TRAIN_AS_USER} -c "sa-learn ${BAYES_DBPATH_ARGS} --clear"
 
   else
-    # set vars for bayes db location and sa-learn parameters
-    :
+        # set vars for bayes db location and sa-learn parameters
+        :
   fi
 
   # bindfs mount remaps user id so spam training user can access the messages
