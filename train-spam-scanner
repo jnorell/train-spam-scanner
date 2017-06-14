@@ -53,6 +53,7 @@ usage() {
                       specify admin email address (use multiple times as needed)
           -f          create admin training folders and set permissions
           -F          create training folders for all users
+          -C          de-duplicate user training folders
           -m mode     merge user trained messages into admin folders
                       'incremental'   only add/remove message changes (default)
                       'rebuild'       wipe and recreate admin training folders
@@ -80,7 +81,7 @@ usage() {
 	EOF
 }
 
-optstring='c:hva:fFm:M:u:g:U:G:d:D:w:b:B:'
+optstring='c:hva:fFCm:M:u:g:U:G:d:D:w:b:B:'
 
 # minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -103,6 +104,7 @@ while getopts "$optstring" opt; do
     a)  test -n "$OPTARG" && ADMIN_USERS+=("$OPTARG");;
     f)  CREATE_ADMIN_FOLDERS="yes";;
     F)  CREATE_USER_FOLDERS="yes";;
+    C)  DEDUPLICATE_USER_FOLDERS="yes";;
     m)  test -n "$OPTARG" || (usage && exit 1)
         case "$OPTARG" in
            incremental|rebuild|none)  REBUILD_FOLDERS_MODE="$OPTARG";;
@@ -158,6 +160,9 @@ shift $((OPTIND-1))
 
 # should we create training folders for all user accounts (yes/no)
 : ${CREATE_USER_FOLDERS:='no'}
+
+# should we deduplicate training folders for all user accounts
+: ${DEDUPLICATE_USER_FOLDERS:='no'}
 
 # clean up user training messages older than this time
 # (must be a valid date specification for a dovecot search_query)
@@ -853,6 +858,26 @@ test -f "${INCOMING_SPAM_GUIDS}" && rm -f "${INCOMING_SPAM_GUIDS}"
 test -f "${INCOMING_NONSPAM_GUIDS}" && rm -f "${INCOMING_NONSPAM_GUIDS}"
 test -f "${TMP_SPAM_GUIDS}" && rm -f "${TMP_SPAM_GUIDS}"
 test -f "${TMP_NONSPAM_GUIDS}" && rm -f "${TMP_NONSPAM_GUIDS}"
+
+# deduplicate user training folders
+if [ "${DEDUPLICATE_USER_FOLDERS}" == "yes" ]
+then
+    log  "Deduplicate training folders for all users"
+    log_debug  "de-duplicating user training folders by dovecot message guid"
+    doveadm deduplicate -A mailbox "${USER_FOLDER_SPAM}"  2>/dev/null
+    doveadm deduplicate -A mailbox "${USER_FOLDER_NONSPAM}"  2>/dev/null
+
+    if [ -n "${FDUPES}" -a -x "${FDUPES}" ]
+    then
+        log_debug  "de-duplicating user training folders with fdupes"
+        doveadm user -u '*' | while read user
+        do
+            home=`doveadm user -f home "${user}"`
+            fdupes -q -d -N -r -H "${home}/Maildir/.${USER_FOLDER_SPAM}/"{new,cur} >/dev/null
+            fdupes -q -d -N -r -H "${home}/Maildir/.${USER_FOLDER_NONSPAM}/"{new,cur} >/dev/null
+        done
+    fi
+fi
 
 # todo: email stats? (# messages, tokens, time taken)
 if [ "${REBUILD_BAYES_MODE}" != "none" -a "${need_to_train}" == "true" ]

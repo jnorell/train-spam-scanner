@@ -6,4 +6,4 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 35 * * * *  root  /usr/local/sbin/train-spam-scanner -F -M none
 
 # train the spam scanner with sorted mail
-15 3 * * *  root  /usr/local/sbin/train-spam-scanner -f
+15 3 * * *  root  /usr/local/sbin/train-spam-scanner -f -C
