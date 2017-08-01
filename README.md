@@ -122,7 +122,7 @@ EOF
 
 Need dovecot iterate_query enabled, which is in /etc/dovecot/dovecot-sql.conf if using ISPConfig.
 
-Messages in users' training folders should be expired after some time (default is 6 months).  Messages in admin training folders should expire, probably later (default is 1 year); ideally retain a minimum number of ham/spam irregardless of age, but that is not implemented.
+Messages in users' training folders should be expired after some time (default is 6 months).  Messages in admin training folders should expire, probably later (default is 1 year); ideally retaining a minimum number of ham/spam irregardless of age, but that is not implemented.
 
 sa-learn will be run as the amavis user, using a bindfs mount to map vmail->amavis user id's to simplify permissions (mount only the public folder paths, not the entire /var/vmail).
 
@@ -133,6 +133,11 @@ You may want to exclude users' training folders from quota limits (to do so, alt
 
 Users should be aware that any mail they put into the training folders will probably be reviewed/seen by an admin, and may be stored on the server for quite some time -- so don't put any sensitive information in there.  Also make sure that is legal in your country.
 
-Users can remove a message from a training folder and it will not get added in the next round of training.  However, if an admin has already copied one of those messages to an override (aka training) folder, it will stay there, the user cannot remove it.
+Users can remove a message from a training folder and it will not get added in the next round of training.  However, if an admin has already copied one of those messages to an override (aka training) folder, it will stay there, the user cannot remove it.  This may be changed in the future, when implementing 'incremental' bayes training mode (which must track all messages in admin training folders between training runs).
+
+
+## Support
+
+Use the [issue tracker](https://github.com/jnorell/train-spam-scanner/issues) for issues and suggestions, and send pull requests with changes.  I'll try to post a howto on howtoforge.com which allows some questions/discussion in comments.
 
 
