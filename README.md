@@ -8,11 +8,22 @@ The design tries to balance the pro's and con's of having users vs. mail adminis
 
 This script has initial functionality, and will be refactored/improved over time.
 
-Currently running on Debian 8 calling spamassassin via amavisd-new, it's fairly configurable via variables.  It is being developed for use on an ISPConfig mail server, and the defaults are set accordingly.
+Currently running on Debian 8 calling spamassassin via amavisd-new, it's fairly configurable.  It is being developed for use on an ISPConfig mail server, and the defaults are set accordingly.
 
-It is working with bayes in berkeley db; it may need enhanced for sql or redis (not yet tested).
+It is working with bayes in sql and berkeley db; redis should work with the same configuration as bayes, but has not been tested.
 
-Testing with ~3500 training messages, the message handling is tolerably fast but sa-learn is not, taking about 1 second per message.  Tests with bayes in sql and redis need done, which may help.  Also need to create an 'incremental' bayes training mode, which should help tremendously (see notes within the script itself).
+The time required to run sa-learn (particularly with txrep enabled) can be problematic with a large number of training messages, though a little sql server tuning can help quite a bit.
+
+Testing with ~6400 training messages (where most messages had previously been trained, a typical daily run once implemented) ran about 450 messages/minute after mysql server tuning.
+
+    Message handling time:  3.5 min.
+    Training (sa-learn):    10 min. (with txrep + bayes)
+                            --------
+    Total time:             14 min.
+    # training messages:    ~6400
+    Overall speed:          ~450 messages per minute
+
+Todo:  to help improve sa-learn speed, need to create an 'incremental' bayes training mode, which should help tremendously (see notes within the script itself).
 
 ## Requirements
 
@@ -22,25 +33,32 @@ Example Bayes and TxRep config from /etc/spamassassin/local.cf:
 
 ```
 # Bayes configuration
-bayes_expiry_max_db_size 5000000
-bayes_auto_expire 0
-bayes_auto_learn 0
-bayes_learn_during_report 0
-bayes_learn_to_journal 1
-bayes_token_sources all
+bayes_store_module             Mail::SpamAssassin::BayesStore::MySQL
+bayes_sql_dsn                  DBI:mysql:spamassassin:localhost
+bayes_sql_username             spamassassin
+bayes_sql_password             some_random_password
+bayes_sql_override_username    amavis
+
+bayes_expiry_max_db_size       5000000
+bayes_auto_expire              0
+bayes_auto_learn               0
+bayes_learn_during_report      0
+bayes_learn_to_journal         1
+bayes_token_sources            all
 
 # might need to work on these:
-bayes_ignore_header X-Bogosity
-bayes_ignore_header X-Spam-Flag
-bayes_ignore_header X-Spam-Status
+bayes_ignore_header            X-Bogosity
+bayes_ignore_header            X-Spam-Flag
+bayes_ignore_header            X-Spam-Status
 
 # remember to load TxRep in v341.pre and create the database table
-use_txrep 1
-txrep_factory Mail::SpamAssassin::SQLBasedAddrList
-user_awl_dsn DBI:mysql:spamassassin:127.0.0.1
-user_awl_sql_username spamassassin
-user_awl_sql_password some_random_password
-user_awl_sql_table txrep
+use_txrep                      1
+txrep_factory                  Mail::SpamAssassin::SQLBasedAddrList
+user_awl_dsn                   DBI:mysql:spamassassin:localhost
+user_awl_sql_username          spamassassin
+user_awl_sql_password          some_random_password
+user_awl_sql_table             txrep
+txrep_ipv4_mask_len            32
 ```
 
 It utilizes shared folders, so must have dovecot's acl and imap_acl plugins enabled, as well as dovecot's iterate_query set.
