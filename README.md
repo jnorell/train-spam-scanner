@@ -72,7 +72,7 @@ For the best results, you must train spamassassin from manually classified mail 
 
 On the other hand, you need a fair bit of both ham and spam to train a scanner well.  Spamassassin won't even utilize bayes without 200 messages of each; ideally much more than that should be provided.  So how to get that much classified mail without an administrator/trusted user having to sort it all?  Harness the power/resources of all users, of course.  And with that, all the inaccuracies they will bring.  Don't want that valid newsletter any more?  Why bother unsubscribing, when you can just move it to the spam folder?
 
-The design here tries to compromise.  We allow users to supply sorted ham/spam messages for training, but then we allow administrative/trusted users to moderate those messages and override users' decisions.
+The design here tries to compromise.  We allow users to supply sorted ham/spam messages for training, but then we allow administrative/trusted users to moderate those messages and override users' decisions.  You can allow all users to supply training messages (train-spam-scanner -F), or only a select few if you only create training folders for those few mail accounts.
 
 ## Design
 
