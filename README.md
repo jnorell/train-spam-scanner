@@ -86,7 +86,7 @@ Messages in the 'Admin/Spam' or 'Admin/Non-Spam' training folders will override 
 
 The system is based on IMAP folders so any imap client, including the server's webmail interface, can be used with it.  The user training folders are just normal IMAP folders with a known name; the admin incoming and training folders are public folders (meaning they are 'shared' folders managed by the sysadmin; they are not available to all users) under the 'Admin/' namespace.
 
-Rather than creating a new system user to own these public folders we use the existing 'vmail' user (which already has access to all mail); don't set a password for the vmail user.  Admins must be other imap users on the same system, and are granted access to the training folders by the train-spam-scanner script.
+Rather than creating a new system user to own these public folders we use the existing 'vmail' user (which already has access to all mail); don't set a password for the vmail user, it is not needed and should not have one.  Admins must be other imap users on the same system, and are granted access to the training folders by the train-spam-scanner script.
 
 Need to load the dovecot acl and imap_acl plugins; these are set in the /etc/dovecot/dovecont.conf file for ISPConfig, eg:
 
