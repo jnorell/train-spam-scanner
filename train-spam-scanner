@@ -1,27 +1,26 @@
 #!/bin/bash
 
-# train-spam-scanner: trains spamassassin via folders
+# train-spam-scanner: trains spamassassin/rspamd via folders
 
-# This script is designed to train spammassassin from
-# imap folders on a dovecot server.  It was developed
-# for use on ISPConfig systems, but should easily adapt
-# to others.
+# This script is designed to train the spam scanner (spammassassin
+# or rspamd) from imap folders on a dovecot server.  It was developed
+# for use on ISPConfig systems, but should easily adapt to others.
 #
 # https://github.com/jnorell/train-spam-scanner
 
-# Copyright (c) 2017, Jesse Norell <jesse@kci.net>
-# Copyright (c) 2017, Kentec Communications, Inc.
+# Copyright (c) 2017-2021, Jesse Norell <jesse@kci.net>
+# Copyright (c) 2017-2021, Kentec Communications, Inc.
 # All rights reserved.
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
-# 
+#
 # 1. Redistributions of source code must retain the above copyright notice, this
 #    list of conditions and the following disclaimer.
 # 2. Redistributions in binary form must reproduce the above copyright notice,
 #    this list of conditions and the following disclaimer in the documentation
 #    and/or other materials provided with the distribution.
-# 
+#
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 # ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -43,7 +42,7 @@ usage() {
     cat <<-'EOF'
         Usage: train-spam-scanner [OPTION] ...
 
-        Train Spamassassin and manage training folders on a dovecot server.
+        Train SpamAssassin/Rspamd and manage training folders on a dovecot server.
 
         Available options:
           -c file     set config file location
@@ -77,12 +76,16 @@ usage() {
                       clean up admin training messages older than this
                       (a valid date specification for dovecot search_query)
                       default: '53weeks'
+          -S scanner  specify spam scanner to train
+                      'rspamd'        Rspamd
+                      'spamassassin'  SpamAssassin
+                      default: spamassassin if found, else rspamd
           -s arg      additional arguments to sa-learn (use multiple times)
 
 	EOF
 }
 
-optstring='c:hva:fFCm:M:u:g:U:G:d:D:w:b:B:s:'
+optstring='c:hva:fFCm:M:u:g:U:G:d:D:w:b:B:S:s:'
 
 # minimal getopts to specify config file (full getopts is below)
 while getopts ":$optstring" opt; do
@@ -126,12 +129,51 @@ while getopts "$optstring" opt; do
     d)  test -n "$OPTARG" && SHARED_ROOT="$OPTARG";;
     D)  test -n "$OPTARG" && TRAIN_BIND_MNT="$OPTARG";;
     w)  test -n "$OPTARG" && DATA_DIR="$OPTARG";;
+    S)  test -n "$OPTARG" && SCANNER="$OPTARG";;
     s)  test -n "$OPTARG" && SA_LEARN_ARGS+=" ${OPTARG}";;
     *)  usage && exit 1;;
   esac
 done
 shift $((OPTIND-1))
 
+
+# which spam scanner to train
+#  spamassassin:  spamasassin
+#  rspamd:        rspamd
+#  auto:          uses spamassassin if found, else tries rspamd
+: ${SCANNER:='auto'}
+case "${SCANNER}" in
+    spamassassin|sa-learn|spamc)
+        SCANNER="spamassassin"
+        if ! command -v sa-learn &> /dev/null; then
+            echo "Scanner ${SCANNER} not found." >&2
+            exit 1
+        fi
+        ;;
+    rspamd|rpamc)
+        SCANNER="rspamd"
+        if ! command -v rspamc &> /dev/null; then
+            echo "Scanner ${SCANNER} not found." >&2
+            exit 1
+        fi
+        if [ "${REBUILD_BAYES_MODE}" != "none" ]; then
+            REBUILD_BAYES_MODE='normal'
+        fi
+        ;;
+    *)
+        if command -v sa-learn &> /dev/null; then
+            SCANNER="spamassassin"
+        elif command -v rspamc &> /dev/null; then
+            SCANNER="rspamd"
+            if [ "${REBUILD_BAYES_MODE}" != "none" ]; then
+                REBUILD_BAYES_MODE='normal'
+            fi
+        else
+            echo "Scanner not found, install SpamAssassin or Rspamd." >&2
+            exit 1
+        fi
+        ;;
+esac
 
 # how to rebuild/merge mail in working and incoming folders
 #  incremental:  add only recent spam/non-spam messages (default)
@@ -142,7 +184,8 @@ shift $((OPTIND-1))
 # how to train/rebuild bayes db
 #  normal:       train live bayes db with all messages
 #                in admin incoming folders and admin training folders (default)
-#  rebuild:      create and train a new bayes db, then move to live
+#  rebuild:      create and train a new bayes db, then move to live.
+#                only supported with spamassassin currently.
 #  incremental:  **not yet implemented**, the intent is to:
 #                - unlearn old messages being removed from incoming folders
 #                - train new messages going into incoming folders
@@ -179,31 +222,46 @@ shift $((OPTIND-1))
 : ${SHARED_USER:='vmail'}
 : ${SHARED_GROUP:='vmail'}
 
-# unix user which spam training should be performed as
-: ${TRAIN_AS_USER:='amavis'}
-: ${TRAIN_AS_GROUP:='amavis'}
+if [ "${SCANNER}" = "rspamd" ]; then
+    # unix user which spam training should be performed as
+    : ${TRAIN_AS_USER:='_rspamd'}
+    : ${TRAIN_AS_GROUP:='_rspamd'}
+
+    # location of bind mount point for training
+    : ${TRAIN_BIND_MNT:='/var/lib/rspamd/mnt'}
+else
+    # unix user which spam training should be performed as
+    : ${TRAIN_AS_USER:='amavis'}
+    : ${TRAIN_AS_GROUP:='amavis'}
+
+    # location of bind mount point for training
+    : ${TRAIN_BIND_MNT:='/var/lib/amavis/mnt'}
+fi
+
+# location of live bayes dbpath (unused for sql/redis bayes store) - spamassassin only
+: ${BAYES_LIVE_DBPATH="/var/lib/amavis/.spamassassin/bayes"}
+
+# location of tmp dir for rebuilding bayes db when training - spamassassin only
+: ${BAYES_TEMP_DIR='/var/lib/amavis/.bayes-rebuild'}
+
+# location of bayes dbpath to be trained (unused for sql/redis bayes store) - spamassassin only
+# setting to ${BAYES_LIVE_DBPATH} will train the live bayes db
+: ${BAYES_TRAIN_DBPATH="${BAYES_TEMP_DIR}/bayes"}
+
+# Path to file containing the controller password
+: ${RSPAMD_CONTROLLER_PASSWORD:='/etc/train-spam-scanner/rspamd-controller.password'}
+
+# classifier to learn for (default by rspamc: bayes), e.g. `bayes_user`
+: ${RSPAMD_CLASSIFIER:=''}
 
 # location of shared folders
 : ${SHARED_ROOT:='/var/vmail/admin'}
-
-# location of bind mount point for training
-: ${TRAIN_BIND_MNT:='/var/lib/amavis/mnt'}
-
-# location of live bayes dbpath (unused for sql/redis bayes store)
-: ${BAYES_LIVE_DBPATH="/var/lib/amavis/.spamassassin/bayes"}
-
-# location of tmp dir for rebuilding bayes db when training
-: ${BAYES_TEMP_DIR='/var/lib/amavis/.bayes-rebuild'}
-
-# location of bayes dbpath to be trained (unused for sql/redis bayes store)
-# setting to ${BAYES_LIVE_DBPATH} will train the live bayes db
-: ${BAYES_TRAIN_DBPATH="${BAYES_TEMP_DIR}/bayes"}
 
 # location of persistent data (timestamp file) and tmp files (guid lists)
 : ${DATA_DIR:='/var/lib/train-spam-scanner'}
 
 # imap admin namespace
-: ${ADMIN_NAMESPACE:='Admin/'}
+: ${ADMIN_NAMESPACE:='Admin.'}
 
 # imap folder names for users' training folders
 : ${USER_FOLDER_SPAM:='Train as Spam'}
@@ -244,12 +302,12 @@ then
         function log() {
             ts=`date --rfc-3339=seconds`
             echo "$ts $@";
-            test -z "${LOG_FILE}" -a -w "${LOG_FILE}" && echo "$ts $@" >> ${LOG_FILE};
+            test -n "${LOG_FILE}" -a -w "${LOG_FILE}" && echo "$ts $@" >> ${LOG_FILE};
         }
         function log_err() {
             ts=`date --rfc-3339=seconds`
             echo "$ts $@" 1>&2;
-            test -z "${LOG_FILE}" -a -w "${LOG_FILE}" && echo "$ts $@" >> ${LOG_FILE};
+            test -n "${LOG_FILE}" -a -w "${LOG_FILE}" && echo "$ts $@" >> ${LOG_FILE};
         }
     else
         function log() { :; }
@@ -308,6 +366,19 @@ then
     die "You must specify a bayes dbpath to use 'rebuild' bayes training mode (see BAYES_LIVE_DBPATH and BAYES_TRAIN_DBPATH in config file)."
 fi
 
+if [ "${SCANNER}" = "rspamd" ]
+then
+    rspamc_args=()
+    if [ -r "${RSPAMD_CONTROLLER_PASSWORD}" ]; then
+        rspamc_args+=(-P "${RSPAMD_CONTROLLER_PASSWORD}")
+    else
+        die "Missing password file for rspamc"
+    fi
+    if [ -n "${RSPAMD_CLASSIFIER}" ]; then
+        rspamc_args+=(-c "${RSPAMD_CLASSIFIER}")
+    fi
+fi
+
 log_debug "Config has been read, beginning checks"
 
 cd /
@@ -363,15 +434,15 @@ fi
 
 # ensure bindfs is installed
 BINDFS=`which bindfs 2>/dev/null | head -1`
-if [ -z "${BINDFS}" -o ! -f "${BINDFS}" ] 
-then 
+if [ -z "${BINDFS}" -o ! -f "${BINDFS}" ]
+then
     die "Cannot find bindfs.  Exiting."
 fi
 
 # test if fdupes is installed (optional, but recommended)
 FDUPES=`which fdupes 2>/dev/null | head -1`
-if [ -z "${FDUPES}" -o ! -f "${FDUPES}" ] 
-then 
+if [ -z "${FDUPES}" -o ! -f "${FDUPES}" ]
+then
     log_err "Notice: cannot find fdupes, but continuing anyways."
     log "(installing fdupes would provide better consistency and deduplication)"
 fi
@@ -390,7 +461,7 @@ then
     mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/{cur,new,tmp}"
     mkdir -p "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/{cur,new,tmp}"
 
-    # create missing Admin/ shared folders
+    # create missing Admin/* shared folders
     # assume Maildir++ (folder names are .whatever)
     mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_SPAM}"
     mkdir -p "${SHARED_ROOT}/.${ADMIN_FOLDER_USER_NONSPAM}"
@@ -405,7 +476,7 @@ then
 
     log_debug "Setting imap acls for admin shared folders"
 
-    # set all permissions for Admin/ shared folders
+    # set all permissions for Admin.* shared folders
     for mailbox in "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" \
         "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" \
         "${ADMIN_NAMESPACE}${ADMIN_FOLDER_SPAM}" \
@@ -456,7 +527,11 @@ then
         done
         IFS=${save_IFS}
 
-        doveadm acl set -u "${admin_user}" "${mailbox}" "authenticated" write write-seen write-deleted insert  2>/dev/null
+	for addr in "${ADMIN_USERS[@]}"
+	do
+		doveadm acl set -u "${admin_user}" "${mailbox}" "user=${addr}" read write write-seen write-deleted insert post expunge  2>/dev/nul
+	done
+
     done
 fi
 
@@ -469,7 +544,7 @@ fi
 
 if [ "${REBUILD_FOLDERS_MODE}" = "none" ]
 then
-    log_debug "Not merging user trained messages into admin folders (none)"
+    log_debug "Not merging user trained messages into admin folders:  mode none"
     need_to_train="true"
 else
     log "Merging user trained messages into admin folders:  ${REBUILD_FOLDERS_MODE} mode"
@@ -515,9 +590,9 @@ else
     doveadm deduplicate -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}"  2>/dev/null
     doveadm deduplicate -u "${admin_user}" mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}"  2>/dev/null
 
-    log_debug De-duplicating working folders with fdupes
-    if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+    if [ -n "${FDUPES}" -a -x "${FDUPES}" ]
     then
+        log_debug De-duplicating working folders with fdupes
         fdupes -q -d -N -r -H "${SHARED_ROOT}/.${TMP_FOLDER_SPAM}/"{new,cur} >/dev/null
         fdupes -q -d -N -r -H "${SHARED_ROOT}/.${TMP_FOLDER_NONSPAM}/"{new,cur} >/dev/null
     fi
@@ -530,7 +605,7 @@ else
         "${ADMIN_NAMESPACE}${ADMIN_FOLDER_IGNORE}"
     do
         doveadm -f table fetch -u "${admin_user}" 'guid' mailbox "${mailbox}" 2>/dev/null
-    done | awk '{print $1}' | sort -u > "${SORTED_GUIDS}"
+    done | sed '/uid/d' | awk '{print $1}' | sort -u > "${SORTED_GUIDS}"
 
     need_to_train="false"
 
@@ -552,7 +627,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
-            | grep -F -f "${SORTED_GUIDS}" )
+            | sed '/uid/d' | grep -F -f "${SORTED_GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -561,7 +636,7 @@ else
             doveadm expunge -u "${admin_user}" mailbox "${src_MBX}" uid "${uid_list}"
         fi
 
-        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | sed '/uid/d' | wc -l` -gt 0 ]
         then
             need_to_train="true"
             doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" all
@@ -576,7 +651,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
-            | grep -F -f "${SORTED_GUIDS}" )
+            | sed '/uid/d' | grep -F -f "${SORTED_GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -584,7 +659,7 @@ else
             doveadm expunge -u "${admin_user}" mailbox "${src_MBX}" uid "${uid_list}"
         fi
 
-        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | sed '/uid/d' | wc -l` -gt 0 ]
         then
             need_to_train="true"
             doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" all
@@ -595,16 +670,16 @@ else
         log_debug  Saving message guids for working and incoming folders
         doveadm -f table fetch -u "${admin_user}" 'guid' \
             mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_SPAM}" 2>/dev/null \
-                | awk '{print $1}' | sort -u > "${TMP_SPAM_GUIDS}"
+                | sed '/uid/d' | awk '{print $1}' | sort -u > "${TMP_SPAM_GUIDS}"
         doveadm -f table fetch -u "${admin_user}" 'guid' \
             mailbox "${ADMIN_NAMESPACE}${TMP_FOLDER_NONSPAM}" 2>/dev/null \
-                | awk '{print $1}' | sort -u > "${TMP_NONSPAM_GUIDS}"
+                | sed '/uid/d' | awk '{print $1}' | sort -u > "${TMP_NONSPAM_GUIDS}"
         doveadm -f table fetch -u "${admin_user}" 'guid' \
             mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}" 2>/dev/null \
-                | awk '{print $1}' | sort -u > "${INCOMING_SPAM_GUIDS}"
+                | sed '/uid/d' | awk '{print $1}' | sort -u > "${INCOMING_SPAM_GUIDS}"
         doveadm -f table fetch -u "${admin_user}" 'guid' \
             mailbox "${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_NONSPAM}" 2>/dev/null \
-                | awk '{print $1}' | sort -u > "${INCOMING_NONSPAM_GUIDS}"
+                | sed '/uid/d' | awk '{print $1}' | sort -u > "${INCOMING_NONSPAM_GUIDS}"
 
         log_debug  Remove from incoming Spam any messages in working Non-Spam
         MBX="${ADMIN_NAMESPACE}${ADMIN_FOLDER_USER_SPAM}"
@@ -615,7 +690,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
-            | grep -F -f "${GUIDS}" )
+            | sed '/uid/d' | grep -F -f "${GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -633,7 +708,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
-            | grep -F -f "${GUIDS}" )
+            | sed '/uid/d' | grep -F -f "${GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -651,7 +726,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
-            | grep -v -F -f "${GUIDS}" )
+            | sed '/uid/d' | grep -v -F -f "${GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -669,7 +744,7 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${MBX}" 2>/dev/null \
-            | grep -v -F -f "${GUIDS}" )
+            | sed '/uid/d' | grep -v -F -f "${GUIDS}" )
 
         uid_list=`echo "${uid_list}" | sed s/,$//`
         if [ -n "${uid_list}" ]
@@ -688,9 +763,9 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
-            | grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
+            | sed '/uid/d' | grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
 
-        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | sed '/uid/d' | wc -l` -gt 0 ]
         then
             need_to_train="true"
             doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" uid "${uid_list}"
@@ -706,9 +781,9 @@ else
         do
             uid_list+="${uid},"
         done < <( doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null \
-            | grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
+            | sed '/uid/d' | grep -v -F -f "${GUIDS}" -f "${SORTED_GUIDS}" )
 
-        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | wc -l` -gt 0 ]
+        if [ `doveadm -f table fetch -u "${admin_user}" 'guid uid' mailbox "${src_MBX}" 2>/dev/null | sed '/uid/d' | wc -l` -gt 0 ]
         then
             need_to_train="true"
             doveadm move -u "${admin_user}" "${dst_MBX}" mailbox "${src_MBX}" uid "${uid_list}"
@@ -729,7 +804,7 @@ else
     done
 
     log_debug  Identify messages found in both ${ADMIN_FOLDER_SPAM} and ${ADMIN_FOLDER_NONSPAM} and move them to ${ADMIN_FOLDER_IGNORE}
-    if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+    if [ -n "${FDUPES}" -a -x "${FDUPES}" ]
     then
         fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_SPAM}/"{new,cur} >/dev/null
         fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_NONSPAM}/"{new,cur} >/dev/null
@@ -740,7 +815,7 @@ else
     fi
 
     log_debug  De-duplicate admin incoming and archive folders with fdupes
-    if [ -n "${FDUPES}" -a -x "${FDUPES}" ] 
+    if [ -n "${FDUPES}" -a -x "${FDUPES}" ]
     then
         # the order of directories here is important, the *first* duplicate file found will be kept
         fdupes -q -d -N -r -H "${SHARED_ROOT}/.${ADMIN_FOLDER_IGNORE}/"{new,cur} \
@@ -789,29 +864,47 @@ then
         fi
 
         log_debug  ${log_msg:='Clearing bayes db'}
-        su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --clear"
+        if [ "${SCANNER}" = "spamassassin" ]
+        then
+            sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --clear
+        fi
     fi
 
     log_debug  'Bindfs mount (remaps user id so spam training user can access the messages)'
     bindfs -r -u ${TRAIN_AS_USER} -g ${TRAIN_AS_GROUP} -p ug=rD ${SHARED_ROOT} ${TRAIN_BIND_MNT}
 
-    # TODO (maybe):  implement a cleanup/filtering script to process all
-    # messages about to be trained and strip various headers, etc.
+    if [ "${SCANNER}" = "spamassassin" ]
+    then
+        # TODO (maybe):  implement a cleanup/filtering script to process all
+        # messages about to be trained and strip various headers, etc.
 
-    log_debug  'Train admin incoming folders (user sorted email)'
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --max-size=0 --no-sync --spam \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_SPAM}/\""
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --sync"
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --max-size=0 --no-sync --ham \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_NONSPAM}/\""
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --sync"
+        log_debug  'Train admin incoming folders (user sorted email)'
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --max-size=0 --no-sync --spam "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_SPAM}/"
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --sync
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --max-size=0 --no-sync --ham "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_NONSPAM}/"
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --sync
 
-    log_debug  'Train admin training folders (admin sorted email)'
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --max-size=0 --no-sync --spam \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_SPAM}/\""
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --sync"
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --max-size=0 --no-sync --ham \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_NONSPAM}/\""
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --sync"
+        log_debug  'Train admin training folders (admin sorted email)'
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --max-size=0 --no-sync --spam "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_SPAM}/"
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --sync
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --max-size=0 --no-sync --ham "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_NONSPAM}/"
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --sync
 
-    # we're just going to ignore the "Ignore" messages, rather than sa-learn --forget them
-    #su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --max-size=0 --forget \"${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_IGNORE}/\""
+        # we're just going to ignore the "Ignore" messages, rather than sa-learn --forget them
+        #sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --max-size=0 --forget "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_IGNORE}/"
+    elif [ "${SCANNER}" = "rspamd" ]; then
+        log_debug "Using socket connection to rspamd"
+
+        log_debug  'Train admin incoming folders (user sorted email)'
+        sudo -u ${TRAIN_AS_USER} rspamc "${rspamc_args[@]}" learn_spam "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_SPAM}/" >/dev/null
+        sudo -u ${TRAIN_AS_USER} rspamc "${rspamc_args[@]}" learn_ham "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_USER_NONSPAM}/" >/dev/null
+
+        log_debug  'Train admin training folders (admin sorted email)'
+        sudo -u ${TRAIN_AS_USER} rspamc "${rspamc_args[@]}" learn_spam "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_SPAM}/" >/dev/null
+        sudo -u ${TRAIN_AS_USER} rspamc "${rspamc_args[@]}" learn_ham "${TRAIN_BIND_MNT}/.${ADMIN_FOLDER_NONSPAM}/" >/dev/null
+    else
+        log_debug  Not capable of training using ${SCANNER}
+    fi
 
     log_debug  Unmounting bindfs mount point
     umount ${TRAIN_BIND_MNT}
@@ -822,19 +915,28 @@ then
         if [ -n "${BAYES_DBPATH_ARGS}" -a -n "${BAYES_LIVE_DBPATH}" \
             -a "${BAYES_TRAIN_DBPATH}" != "${BAYES_LIVE_DBPATH}" ]
         then
-            log_debug  Moving bayes training database to live
-            mv -f "${BAYES_TRAIN_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_seen"
-            mv -f "${BAYES_TRAIN_DBPATH}_toks" "${BAYES_LIVE_DBPATH}_toks"
-            chattr +A "${BAYES_LIVE_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_toks" 2>/dev/null
+            if [ "${SCANNER}" = "spamassassin" ]
+            then
+                log_debug  Moving bayes training database to live
+                mv -f "${BAYES_TRAIN_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_seen"
+                mv -f "${BAYES_TRAIN_DBPATH}_toks" "${BAYES_LIVE_DBPATH}_toks"
+                chattr +A "${BAYES_LIVE_DBPATH}_seen" "${BAYES_LIVE_DBPATH}_toks" 2>/dev/null
+            fi
         fi
     fi
 
     sync
 
-    log_debug  Restart amavis and spamd if currently running
-    # todo: move init script commands to config vars
-    /etc/init.d/amavis status 2>/dev/null >/dev/null && /etc/init.d/amavis restart >/dev/null
-    /etc/init.d/spamassassin status 2>/dev/null >/dev/null && /etc/init.d/spamassassin restart >/dev/null
+    if [ "${SCANNER}" = "spamassassin" ]
+    then
+        log_debug  Restart amavis and spamd if currently running
+        # todo: move reload commands to config vars
+        systemctl status amavis 2>/dev/null >/dev/null && systemctl restart spamassassin >/dev/null
+        systemctl status spamassassin 2>/dev/null >/dev/null && systemctl restart spamassassin >/dev/null
+    elif [ "${SCANNER}" = "rspamd" ]
+    then
+        systemctl status rspamd 2>/dev/null >/dev/null && systemctl restart rspamd >/dev/null
+    fi
 
 else
     log_debug "Not training bayes database"
@@ -907,8 +1009,15 @@ fi
 # todo: email stats? (# messages, tokens, time taken)
 if [ "${REBUILD_BAYES_MODE}" != "none" -a "${need_to_train}" = "true" ]
 then
-    log_debug  Print bayes stats
-    su ${TRAIN_AS_USER} -c "sa-learn ${SA_LEARN_ARGS} --dump magic"
+    if [ "${SCANNER}" = "spamassassin" ]
+    then
+        log_debug  Print bayes stats
+        sudo -u ${TRAIN_AS_USER} sa-learn "${SA_LEARN_ARGS}" --dump magic
+    elif [ "${SCANNER}" = "rspamd" ]
+    then
+        log_debug  Print rspamd stats
+        sudo -u ${TRAIN_AS_USER} rspamc "${rspamc_args[@]}" stat
+    fi
 fi
 
 exit 0
