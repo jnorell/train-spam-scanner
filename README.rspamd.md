@@ -30,7 +30,7 @@ Rspamd currently has no ability to unlearn a message once trained.  If a message
 
 ## train-spam-scanner with rspamd setup on Debian 10
 
-This is is a brief setup for use with rspamd on a Debian 10 box acting as an ISPConfig mail server; setup for other systems will be similar.  Note if using ISPConfig that any customizations made to dovecot or rspamd config files need to be made to any corresponding conf-custom templates, or they will be overwritten in future ISPConfig updates.
+This is is a brief setup for use with rspamd on a Debian 10 box acting as an ISPConfig mail server; setup for other systems will be similar.  Note if using ISPConfig that any customizations made to dovecot or rspamd config files need to be made to any corresponding conf-custom templates, or they will be overwritten in future ISPConfig updates.  The config below uses the dovecot_custom.conf.master template introduced in 3.2.3.
 
 Start with a working ISPConfig mail server with rspamd running.
 
@@ -44,7 +44,7 @@ passwd --lock _rspamc
 Dovecot will be setup with imapsieve based training, needs the acl and imap_acl plugins enabled, and the 'Admin.' namespace created:
 
 ```
-cat <<'EOF' >>/etc/dovecot/dovecot.conf
+cat <<'EOF' >>/etc/dovecot/conf.d/99-ispconfig-custom-config.conf
 
 # config for imapsieve based on https://doc.dovecot.org/configuration_manual/howto/antispam_with_sieve/
 plugin {
@@ -72,9 +72,9 @@ plugin {
 }
 
 # acl and imap_acl used by train-spam-scanner
-mail_plugins = acl
+mail_plugins = $mail_plugins acl
 protocol imap {
-  mail_plugins = $mail_plugins acl imap_acl
+  mail_plugins = $mail_plugins acl imap_acl imap_sieve
 }
 plugin {
   acl = vfile
@@ -89,6 +89,8 @@ namespace {
     subscriptions = yes
 }
 EOF
+
+cp /etc/dovecot/conf.d/99-ispconfig-custom-config.conf /usr/local/ispconfig/server/conf-custom/install/dovecot_custom.conf.master
 ```
 
 In dovecot-sql.conf we will ignore quota for the training folders (and increase for Trash).
