@@ -290,10 +290,10 @@ Now we configure the rspamd controller password, which in ISPConfig you can look
 
 
 ```
-touch /etc/dovecot/rspamd-controller.conf.sh
-chown root:dovecot /etc/dovecot/rspamd-controller.conf.sh
-chmod 640 /etc/dovecot/rspamd-controller.conf.sh
-echo 'your-rspamd-controller-password-here' > /etc/dovecot/rspamd-controller.conf.sh
+touch /etc/dovecot/rspamd-controller.password
+chown root:dovecot /etc/dovecot/rspamd-controller.password
+chmod 640 /etc/dovecot/rspamd-controller.password
+echo 'your-rspamd-controller-password-here' > /etc/dovecot/rspamd-controller.password
 ```
 
 Install the 'bindfs' and 'fdupes' packages:
@@ -330,7 +330,7 @@ DATA_DIR='/var/lib/train-spam-scanner'
 RSPAMD_CONTROLLER_PASSWORD=/etc/train-spam-scanner/rspamd-controller.password
 EOF
 
-cp /etc/dovecot/rspamd-controller.conf.sh /etc/train-spam-scanner/rspamd-controller.password
+cp /etc/dovecot/rspamd-controller.password /etc/train-spam-scanner/rspamd-controller.password
 chown root:_rspamc /etc/train-spam-scanner/rspamd-controller.password
 chmod 640 /etc/train-spam-scanner/rspamd-controller.password
 mkdir /var/lib/train-spam-scanner
