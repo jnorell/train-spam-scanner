@@ -278,6 +278,7 @@ RSPAMD_CLASSIFIER=
 EOF
 
 
+systemctl reload dovecot
 sievec /usr/lib/dovecot/sieve/report-ham.sieve
 sievec /usr/lib/dovecot/sieve/report-spam.sieve
 chmod +x /usr/lib/dovecot/sieve/learn-spam.rspamd.sh
